@@ -1,0 +1,103 @@
+name: Jenkins and Terraform Demo
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Identity
+        run: |
+          echo "Name: Aditya Ubale | PRN: 202301040111"
+          date
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: terraform version
+        run: terraform version
+      - name: terraform fmt
+        working-directory: terraform
+        run: terraform fmt -check -diff && echo "fmt OK"
+      - name: terraform init
+        working-directory: terraform
+        run: terraform init -backend=false
+      - name: terraform validate
+        working-directory: terraform
+        run: terraform validate
+      - name: terraform plan
+        working-directory: terraform
+        env:
+          TF_VAR_offline_validation: "true"
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy
+        run: terraform plan -no-color
+
+  jenkins-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Identity
+        run: |
+          echo "Name: Aditya Ubale | PRN: 202301040111"
+          date
+      - name: Build Jenkins image
+        run: docker build -t jenkins-demo jenkins
+      - name: Start Jenkins
+        run: |
+          docker run -d --name jenkins -p 8080:8080 \
+            -e REPO_URL="https://github.com/${{ github.repository }}.git" \
+            -e BRANCH="*/${{ github.ref_name }}" \
+            jenkins-demo
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080/login >/dev/null && echo "Jenkins is up" && break
+            sleep 5
+          done
+      - name: Trigger pipeline build
+        run: |
+          CRUMB=$(curl -s -c cj.txt http://localhost:8080/crumbIssuer/api/json | python3 -c "import sys,json;print(json.load(sys.stdin)['crumb'])")
+          curl -s -b cj.txt -X POST -H "Jenkins-Crumb: $CRUMB" -o /dev/null -w "trigger HTTP %{http_code}\n" \
+            http://localhost:8080/job/cicd-terraform-pipeline/build
+      - name: Wait for build and print console log
+        run: |
+          for i in $(seq 1 120); do
+            R=$(curl -s http://localhost:8080/job/cicd-terraform-pipeline/1/api/json || true)
+            if echo "$R" | grep -q '"building":false'; then break; fi
+            sleep 5
+          done
+          curl -s http://localhost:8080/job/cicd-terraform-pipeline/1/consoleText | tee console.txt
+          echo "-------- RESULT --------"
+          curl -s http://localhost:8080/job/cicd-terraform-pipeline/1/api/json | python3 -c "import sys,json;print(json.load(sys.stdin)['result'])" | tee result.txt
+          grep -q SUCCESS result.txt
+      - name: Screenshots of Jenkins UI
+        if: always()
+        run: |
+          pip install playwright
+          python3 -m playwright install --with-deps chromium
+          python3 - <<'PY'
+          from playwright.sync_api import sync_playwright
+          base = "http://localhost:8080"
+          pages = {
+            "1_dashboard": "/",
+            "2_job_stage_view": "/job/cicd-terraform-pipeline/",
+            "3_console_output": "/job/cicd-terraform-pipeline/1/console",
+            "4_test_results": "/job/cicd-terraform-pipeline/1/testReport/",
+            "5_build_overview": "/job/cicd-terraform-pipeline/1/",
+          }
+          with sync_playwright() as p:
+              b = p.chromium.launch()
+              pg = b.new_page(viewport={"width": 1400, "height": 900})
+              for name, path in pages.items():
+                  pg.goto(base + path); pg.wait_for_timeout(2500)
+                  pg.screenshot(path=name + ".png", full_page=True)
+              b.close()
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jenkins-evidence
+          path: |
+            *.png
+            console.txt

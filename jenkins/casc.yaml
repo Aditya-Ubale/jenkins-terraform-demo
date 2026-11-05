@@ -1,0 +1,23 @@
+jenkins:
+  systemMessage: "Jenkins CI/CD with Terraform | Aditya Ubale | PRN 202301040111"
+  numExecutors: 2
+  authorizationStrategy: unsecured
+security:
+  globalJobDslSecurityConfiguration:
+    useScriptSecurity: false
+jobs:
+  - script: >
+      pipelineJob('cicd-terraform-pipeline') {
+        description('Pulls code from GitHub, builds, tests and validates Terraform')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('${REPO_URL}') }
+                branch('${BRANCH}')
+              }
+            }
+            scriptPath('Jenkinsfile')
+          }
+        }
+      }
